@@ -1,210 +1,221 @@
 import os
-import sqlite3
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from web3 import Web3
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-SENDER_ADDRESS = "0xd5F168CFa6a68C21d7849171D6Aa5DDc9307E544"
-TOKEN_CONTRACT = "0xd5baB4C1b92176f9690c0d2771EDbF18b73b8181"
-BSC_RPC = "https://bsc-dataseed.binance.org/"
-CHANNEL_USERNAME = "@benjaminfranklintoken"
+# راه‌اندازی لاگینگ
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-w3 = Web3(Web3.HTTPProvider(BSC_RPC))
-contract_abi = [{
-    "constant": False,
-    "inputs": [{"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"}],
-    "name": "transfer",
-    "outputs": [{"name": "", "type": "bool"}],
-    "type": "function"
-}]
-contract = w3.eth.contract(address=Web3.toChecksumAddress(TOKEN_CONTRACT), abi=contract_abi)
+logger = logging.getLogger(__name__)
 
-conn = sqlite3.connect("bot_database.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    wallet_address TEXT,
-    language TEXT DEFAULT 'en',
-    has_received_airdrop INTEGER DEFAULT 0,
-    invite_code TEXT UNIQUE)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS invites (
-    inviter_id INTEGER,
-    invitee_id INTEGER,
-    reward_given INTEGER DEFAULT 0,
-    PRIMARY KEY (inviter_id, invitee_id))''')
-conn.commit()
+# اتصال به شبکه BNB (مثلا با RPC رایگان)
+w3 = Web3(Web3.HTTPProvider('https://bsc-dataseed.binance.org/'))
 
-LANGUAGES = {
-    "fa": {
-        "welcome": "خوش آمدید! لطفا آدرس کیف پول BEP-20 خود را ارسال کنید:",
-        "wallet_received": "آدرس کیف پول ثبت شد!",
-        "already_received": "شما قبلا ایردراپ را دریافت کرده‌اید.",
-        "airdrop_sent": "ایردراپ با موفقیت ارسال شد!",
-        "invite_message": "لینک دعوت شما:
-https://t.me/Bjfairdrop_bot?start={invite_code}",
-        "invite_reward": "شما بابت دعوت یک کاربر ۱۰۰ توکن دریافت کردید!",
-        "invalid_wallet": "آدرس کیف پول معتبر نیست.",
-        "not_member": "شما عضو کانال نیستید.",
-        "verify_prompt": "دستور /verify را ارسال کنید.",
-        "help": "آدرس کیف پول را ارسال کنید. با /invite لینک دعوت بگیرید. با /verify عضویت را تأیید کنید."
-    },
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+PRIVATE_KEY = os.getenv('PRIVATE_KEY')
+
+AIRDROP_WALLET = '0xd5F168CFa6a68C21d7849171D6Aa5DDc9307E544'
+CONTRACT_ADDRESS = '0xd5baB4C1b92176f9690c0d2771EDbF18b73b8181'
+
+# آدرس ربات تلگرام برای لینک دعوت
+BOT_USERNAME = 'Bjfairdrop_bot'
+
+# ABI ساده‌شده توکن (ERC20 استاندارد)
+ERC20_ABI = [
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "_to", "type": "address"},
+            {"name": "_value", "type": "uint256"}
+        ],
+        "name": "transfer",
+        "outputs": [{"name": "", "type": "bool"}],
+        "type": "function"
+    }
+]
+
+contract = w3.eth.contract(address=Web3.to_checksum_address(CONTRACT_ADDRESS), abi=ERC20_ABI)
+
+# ذخیره کاربران و وضعیت‌ها (در حافظه، برای راه‌اندازی مجدد نیاز به دیتابیس دارید)
+users = {}
+referrals = {}
+
+# پیام‌ها به چند زبان
+texts = {
     "en": {
-        "welcome": "Welcome! Please send your BEP-20 wallet address:",
-        "wallet_received": "Wallet address saved!",
-        "already_received": "You have already received the airdrop.",
-        "airdrop_sent": "Airdrop sent successfully!",
-        "invite_message": "Your invite link:
-https://t.me/Bjfairdrop_bot?start={invite_code}",
-        "invite_reward": "You received 100 tokens for a successful referral!",
-        "invalid_wallet": "Invalid wallet address.",
-        "not_member": "You are not a member of the channel.",
-        "verify_prompt": "Send /verify after joining the channel.",
-        "help": "Send your wallet address. Use /invite to get your referral link. Use /verify after joining the channel."
+        "welcome": "Welcome! Please send me your wallet address to receive 500 BJFairdrop tokens.",
+        "invalid_wallet": "Invalid wallet address. Please try again.",
+        "already_claimed": "You have already claimed your initial 500 tokens.",
+        "transfer_success": "Successfully sent {amount} tokens to {wallet}.",
+        "invite_message": "Your invitation link:\nhttps://t.me/{bot_username}?start={user_id}",
+        "referral_bonus": "You received 100 tokens for a successful referral!",
+        "unknown_command": "Unknown command.",
+        "send_wallet": "Please send your wallet address.",
+        "not_in_channel": "Please join our channel first: https://t.me/benjaminfranklintoken",
+        "verify_success": "Verification successful! You got 500 tokens.",
+        "already_verified": "You already verified and received your tokens.",
+        "start": "Hello! Use /start to begin.",
+    },
+    "fa": {
+        "welcome": "خوش آمدید! لطفا آدرس کیف پول خود را ارسال کنید تا ۵۰۰ توکن BJFairdrop دریافت کنید.",
+        "invalid_wallet": "آدرس کیف پول نامعتبر است. لطفا دوباره تلاش کنید.",
+        "already_claimed": "شما قبلا ۵۰۰ توکن اولیه را دریافت کرده‌اید.",
+        "transfer_success": "{amount} توکن با موفقیت به {wallet} ارسال شد.",
+        "invite_message": "لینک دعوت شما:\nhttps://t.me/{bot_username}?start={user_id}",
+        "referral_bonus": "شما به ازای دعوت موفق ۱۰۰ توکن دریافت کردید!",
+        "unknown_command": "دستور نامشخص.",
+        "send_wallet": "لطفا آدرس کیف پول خود را ارسال کنید.",
+        "not_in_channel": "لطفا ابتدا در کانال ما عضو شوید: https://t.me/benjaminfranklintoken",
+        "verify_success": "تایید موفقیت‌آمیز! ۵۰۰ توکن به شما داده شد.",
+        "already_verified": "شما قبلا تایید شدید و توکن دریافت کردید.",
+        "start": "سلام! از /start برای شروع استفاده کنید.",
     },
     "ar": {
-        "welcome": "مرحبًا! الرجاء إرسال عنوان محفظة BEP-20 الخاص بك:",
-        "wallet_received": "تم حفظ عنوان المحفظة!",
-        "already_received": "لقد استلمت التوزيع بالفعل.",
-        "airdrop_sent": "تم إرسال التوزيع بنجاح!",
-        "invite_message": "رابط الدعوة الخاص بك:
-https://t.me/Bjfairdrop_bot?start={invite_code}",
-        "invite_reward": "لقد حصلت على 100 توكن لدعوتك مستخدمًا جديدًا!",
-        "invalid_wallet": "عنوان المحفظة غير صالح.",
-        "not_member": "أنت لست عضوًا في القناة.",
-        "verify_prompt": "أرسل /verify بعد الانضمام للقناة.",
-        "help": "أرسل عنوان المحفظة. استخدم /invite للحصول على رابط الإحالة. استخدم /verify بعد الانضمام للقناة."
+        "welcome": "مرحبا! الرجاء إرسال عنوان محفظتك لتلقي 500 توكن BJFairdrop.",
+        "invalid_wallet": "عنوان المحفظة غير صالح. حاول مرة أخرى.",
+        "already_claimed": "لقد استلمت 500 توكن أولية بالفعل.",
+        "transfer_success": "تم إرسال {amount} توكن إلى {wallet} بنجاح.",
+        "invite_message": "رابط الدعوة الخاص بك:\nhttps://t.me/{bot_username}?start={user_id}",
+        "referral_bonus": "لقد حصلت على 100 توكن مقابل دعوة ناجحة!",
+        "unknown_command": "أمر غير معروف.",
+        "send_wallet": "الرجاء إرسال عنوان محفظتك.",
+        "not_in_channel": "يرجى الانضمام إلى قناتنا أولاً: https://t.me/benjaminfranklintoken",
+        "verify_success": "تم التحقق بنجاح! حصلت على 500 توكن.",
+        "already_verified": "لقد تم التحقق منك مسبقاً واستلمت التوكن.",
+        "start": "مرحباً! استخدم /start للبدء.",
     },
     "ru": {
-        "welcome": "Добро пожаловать! Пожалуйста, отправьте свой BEP-20 адрес кошелька:",
-        "wallet_received": "Адрес кошелька сохранён!",
-        "already_received": "Вы уже получили airdrop.",
-        "airdrop_sent": "Airdrop успешно отправлен!",
-        "invite_message": "Ваша ссылка приглашения:
-https://t.me/Bjfairdrop_bot?start={invite_code}",
-        "invite_reward": "Вы получили 100 токенов за приглашение пользователя!",
-        "invalid_wallet": "Недействительный адрес кошелька.",
-        "not_member": "Вы не являетесь участником канала.",
-        "verify_prompt": "Отправьте /verify после вступления в канал.",
-        "help": "Отправьте адрес кошелька. Используйте /invite для получения ссылки. Используйте /verify после вступления в канал."
+        "welcome": "Добро пожаловать! Пожалуйста, отправьте адрес вашего кошелька, чтобы получить 500 токенов BJFairdrop.",
+        "invalid_wallet": "Неверный адрес кошелька. Пожалуйста, попробуйте снова.",
+        "already_claimed": "Вы уже получили начальные 500 токенов.",
+        "transfer_success": "Успешно отправлено {amount} токенов на {wallet}.",
+        "invite_message": "Ваша реферальная ссылка:\nhttps://t.me/{bot_username}?start={user_id}",
+        "referral_bonus": "Вы получили 100 токенов за успешную рекомендацию!",
+        "unknown_command": "Неизвестная команда.",
+        "send_wallet": "Пожалуйста, отправьте адрес вашего кошелька.",
+        "not_in_channel": "Пожалуйста, сначала присоединитесь к нашему каналу: https://t.me/benjaminfranklintoken",
+        "verify_success": "Проверка успешна! Вы получили 500 токенов.",
+        "already_verified": "Вы уже прошли проверку и получили токены.",
+        "start": "Привет! Используйте /start для начала.",
     },
     "zh": {
-        "welcome": "欢迎！请发送您的 BEP-20 钱包地址：",
-        "wallet_received": "钱包地址已保存！",
-        "already_received": "您已经领取过空投。",
-        "airdrop_sent": "空投成功发送！",
-        "invite_message": "您的邀请链接：
-https://t.me/Bjfairdrop_bot?start={invite_code}",
-        "invite_reward": "您因邀请新用户获得了 100 个代币！",
-        "invalid_wallet": "无效的钱包地址。",
-        "not_member": "您尚未加入频道。",
-        "verify_prompt": "加入频道后请发送 /verify。",
-        "help": "发送钱包地址。使用 /invite 获取邀请链接。加入频道后使用 /verify。"
+        "welcome": "欢迎！请发送您的钱包地址以接收500个BJFairdrop代币。",
+        "invalid_wallet": "钱包地址无效。请再试一次。",
+        "already_claimed": "您已领取初始的500个代币。",
+        "transfer_success": "成功发送{amount}个代币到{wallet}。",
+        "invite_message": "您的邀请链接:\nhttps://t.me/{bot_username}?start={user_id}",
+        "referral_bonus": "您因成功邀请获得100个代币！",
+        "unknown_command": "未知命令。",
+        "send_wallet": "请发送您的钱包地址。",
+        "not_in_channel": "请先加入我们的频道：https://t.me/benjaminfranklintoken",
+        "verify_success": "验证成功！您已获得500个代币。",
+        "already_verified": "您已验证并获得代币。",
+        "start": "你好！使用 /start 开始。",
     },
     "fr": {
-        "welcome": "Bienvenue ! Veuillez envoyer votre adresse de portefeuille BEP-20 :",
-        "wallet_received": "Adresse du portefeuille enregistrée !",
-        "already_received": "Vous avez déjà reçu l'airdrop.",
-        "airdrop_sent": "Airdrop envoyé avec succès !",
-        "invite_message": "Votre lien d'invitation :
-https://t.me/Bjfairdrop_bot?start={invite_code}",
-        "invite_reward": "Vous avez reçu 100 tokens pour une invitation réussie !",
-        "invalid_wallet": "Adresse de portefeuille invalide.",
-        "not_member": "Vous n'êtes pas membre du canal.",
-        "verify_prompt": "Envoyez /verify après avoir rejoint le canal.",
-        "help": "Envoyez votre adresse de portefeuille. Utilisez /invite pour obtenir votre lien. Envoyez /verify après avoir rejoint le canal."
+        "welcome": "Bienvenue! Veuillez envoyer votre adresse de portefeuille pour recevoir 500 jetons BJFairdrop.",
+        "invalid_wallet": "Adresse de portefeuille invalide. Veuillez réessayer.",
+        "already_claimed": "Vous avez déjà réclamé vos 500 jetons initiaux.",
+        "transfer_success": "{amount} jetons envoyés avec succès à {wallet}.",
+        "invite_message": "Votre lien d'invitation:\nhttps://t.me/{bot_username}?start={user_id}",
+        "referral_bonus": "Vous avez reçu 100 jetons pour un parrainage réussi!",
+        "unknown_command": "Commande inconnue.",
+        "send_wallet": "Veuillez envoyer votre adresse de portefeuille.",
+        "not_in_channel": "Veuillez d'abord rejoindre notre chaîne : https://t.me/benjaminfranklintoken",
+        "verify_success": "Vérification réussie! Vous avez reçu 500 jetons.",
+        "already_verified": "Vous avez déjà été vérifié et reçu vos jetons.",
+        "start": "Bonjour! Utilisez /start pour commencer.",
     }
 }
 
-def get_user_language(user_id):
-    cursor.execute("SELECT language FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    return row[0] if row else "fa"
+def get_lang(update: Update):
+    user_id = update.effective_user.id
+    # ساده‌ترین حالت: همیشه انگلیسی (می‌توان پیشرفته‌تر کرد)
+    # اگر بخواهیم بر اساس زبان تلگرام کاربر زبان انتخاب کنیم:
+    lang_code = update.effective_user.language_code
+    if lang_code and lang_code[:2] in texts:
+        return lang_code[:2]
+    return "en"  # پیش‌فرض انگلیسی
 
-def send_tokens(to_address, amount):
-    nonce = w3.eth.get_transaction_count(SENDER_ADDRESS)
-    tx = contract.functions.transfer(Web3.toChecksumAddress(to_address), amount).buildTransaction({
-        'chainId': 56, 'gas': 100000, 'gasPrice': w3.toWei('5', 'gwei'), 'nonce': nonce
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update)
+    await update.message.reply_text(texts[lang]["welcome"])
+
+async def send_wallet_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update)
+    text = update.message.text.strip()
+    if not Web3.isAddress(text):
+        await update.message.reply_text(texts[lang]["invalid_wallet"])
+        return
+
+    user_id = update.effective_user.id
+    user_wallet = Web3.to_checksum_address(text)
+
+    # بررسی قبلی بودن دریافت اولیه
+    if users.get(user_id, {}).get("claimed"):
+        await update.message.reply_text(texts[lang]["already_claimed"])
+        return
+
+    # انتقال ۵۰۰ توکن
+    try:
+        tx_hash = transfer_tokens(user_wallet, 500)
+    except Exception as e:
+        logger.error(f"Error sending tokens: {e}")
+        await update.message.reply_text("Error sending tokens.")
+        return
+
+    # ذخیره وضعیت کاربر
+    users[user_id] = {
+        "wallet": user_wallet,
+        "claimed": True,
+        "referrals": set()
+    }
+
+    await update.message.reply_text(texts[lang]["transfer_success"].format(amount=500, wallet=user_wallet))
+
+async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update)
+    user_id = update.effective_user.id
+    invite_link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+    await update.message.reply_text(texts[lang]["invite_message"].format(bot_username=BOT_USERNAME, user_id=user_id))
+
+def transfer_tokens(to_address, amount):
+    nonce = w3.eth.get_transaction_count(AIRDROP_WALLET)
+    tx = contract.functions.transfer(
+        Web3.to_checksum_address(to_address),
+        amount * (10 ** 18)  # فرض بر 18 رقم اعشار توکن
+    ).build_transaction({
+        'chainId': 56,
+        'gas': 200000,
+        'gasPrice': w3.to_wei('5', 'gwei'),
+        'nonce': nonce,
     })
+
     signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
     return tx_hash.hex()
 
-def start(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    args = context.args
-    if args and args[0].isdigit():
-        inviter_id = int(args[0])
-        if inviter_id != user_id:
-            cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (user_id,))
-            cursor.execute("INSERT OR IGNORE INTO invites(inviter_id, invitee_id) VALUES (?, ?)", (inviter_id, user_id))
-            conn.commit()
-    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (user_id,))
-    update.message.reply_text(LANGUAGES["fa"]["welcome"])
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update)
+    await update.message.reply_text(texts[lang]["start"])
 
-def handle_wallet(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    wallet = update.message.text.strip()
-    lang = get_user_language(user_id)
-    if not w3.isAddress(wallet):
-        update.message.reply_text(LANGUAGES[lang]["invalid_wallet"])
-        return
-    cursor.execute("SELECT has_received_airdrop FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    if row and row[0] == 1:
-        update.message.reply_text(LANGUAGES[lang]["already_received"])
-        return
-    cursor.execute("UPDATE users SET wallet_address=?, has_received_airdrop=1 WHERE user_id=?", (wallet, user_id))
-    conn.commit()
-    try:
-        tx_hash = send_tokens(wallet, 500 * 10**18)
-        update.message.reply_text(LANGUAGES[lang]["airdrop_sent"] + f" https://bscscan.com/tx/{tx_hash}")
-        cursor.execute("SELECT inviter_id FROM invites WHERE invitee_id=?", (user_id,))
-        inviter = cursor.fetchone()
-        if inviter:
-            inviter_id = inviter[0]
-            cursor.execute("SELECT wallet_address FROM users WHERE user_id=?", (inviter_id,))
-            inv_wallet = cursor.fetchone()
-            if inv_wallet and inv_wallet[0]:
-                tx = send_tokens(inv_wallet[0], 100 * 10**18)
-                cursor.execute("UPDATE invites SET reward_given=1 WHERE inviter_id=? AND invitee_id=?", (inviter_id, user_id))
-                conn.commit()
-                context.bot.send_message(chat_id=inviter_id, text=LANGUAGES[get_user_language(inviter_id)]["invite_reward"] + f" https://bscscan.com/tx/{tx}")
-    except Exception as e:
-        update.message.reply_text(f"خطا در ارسال توکن: {e}")
-
-def invite(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    lang = get_user_language(user_id)
-    update.message.reply_text(LANGUAGES[lang]["invite_message"].format(invite_code=user_id))
-
-def verify(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    lang = get_user_language(user_id)
-    try:
-        member = context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
-        if member.status in ['member', 'administrator', 'creator']:
-            update.message.reply_text("عضویت تأیید شد ✅")
-        else:
-            update.message.reply_text(LANGUAGES[lang]["not_member"])
-    except:
-        update.message.reply_text(LANGUAGES[lang]["not_member"])
-
-def help_cmd(update: Update, context: CallbackContext):
-    lang = get_user_language(update.effective_user.id)
-    update.message.reply_text(LANGUAGES[lang]["help"])
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update)
+    await update.message.reply_text(texts[lang]["unknown_command"])
 
 def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("invite", invite))
-    dp.add_handler(CommandHandler("verify", verify))
-    dp.add_handler(CommandHandler("help", help_cmd))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_wallet))
-    updater.start_polling()
-    updater.idle()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-if __name__ == "__main__":
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("invite", invite))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), send_wallet_address))
+    application.add_handler(MessageHandler(filters.COMMAND, unknown))
+
+    application.run_polling()
+
+if __name__ == '__main__':
     main()
