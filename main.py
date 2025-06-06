@@ -1,4 +1,9 @@
-import os import json from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters from web3 import Web3 from web3.middleware import geth_poa_middleware
+import os 
+import json from telegram 
+import Update from telegram.ext 
+import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters from web3 
+import Web3 from web3.middleware 
+import geth_poa_middleware
 
 --- Config --- 
 
