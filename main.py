@@ -20,11 +20,11 @@ TOKEN_DECIMALS = 18
 TOKEN_AMOUNT_MAIN = 500
 TOKEN_AMOUNT_REFERRAL = 100
 
-# Path to JSON file for persisting users
-USERS_FILE = "users.json"
+# Path for storing users.json in a writable directory
+USERS_FILE = "/tmp/users.json"
 
 # ----------------------------------------
-# Logging
+# Logging setup
 # ----------------------------------------
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,21 +48,13 @@ ERC20_ABI = [{
 contract = w3.eth.contract(address=Web3.to_checksum_address(CONTRACT_ADDRESS), abi=ERC20_ABI)
 
 # ----------------------------------------
-# In-memory DB (loaded from JSON)
+# In-memory database
 # ----------------------------------------
-# users: user_id -> {
-#     "wallet": <str>, 
-#     "claimed": <bool>, 
-#     "ref_by": <int>, 
-#     "referral_rewarded": <bool>
-# }
 users = {}
-
-# referrals: referrer_id -> [list of referred user_ids]
 referrals = {}
 
 # ----------------------------------------
-# JSON Persistence Functions
+# JSON persistence functions
 # ----------------------------------------
 def load_users():
     global users, referrals
@@ -72,9 +64,7 @@ def load_users():
                 data = json.load(f)
                 users = data.get("users", {})
                 referrals = data.get("referrals", {})
-                # JSON keys are strings; convert referrals' inner lists to ints
                 referrals = {int(k): v for k, v in referrals.items()}
-                # Convert users' keys to int (user_id)
                 users = {int(k): v for k, v in users.items()}
                 logger.info(f"Loaded {len(users)} users and {len(referrals)} referrers from {USERS_FILE}.")
         except Exception as e:
@@ -82,6 +72,7 @@ def load_users():
             users = {}
             referrals = {}
     else:
+        logger.info(f"{USERS_FILE} not found. Starting with empty users/referrals.")
         users = {}
         referrals = {}
 
@@ -91,7 +82,6 @@ def save_users():
             "users": users,
             "referrals": referrals
         }
-        # Convert keys to str for JSON
         data_to_dump = {
             "users": {str(k): v for k, v in users.items()},
             "referrals": {str(k): v for k, v in referrals.items()}
@@ -103,7 +93,7 @@ def save_users():
         logger.error(f"Failed to save {USERS_FILE}: {e}")
 
 # ----------------------------------------
-# Utility: Check Telegram Channel Membership
+# Check Telegram channel membership
 # ----------------------------------------
 async def is_member(user_id, bot):
     try:
@@ -113,7 +103,7 @@ async def is_member(user_id, bot):
         return False
 
 # ----------------------------------------
-# Utility: Send BJF Token via Web3
+# Send token via Web3
 # ----------------------------------------
 def send_token(to_address, amount):
     try:
@@ -135,22 +125,19 @@ def send_token(to_address, amount):
         return None
 
 # ----------------------------------------
-# /start Command Handler
+# /start command handler
 # ----------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
 
-    # اگر کاربر جدید است، یک ورودی خالی در users ایجاد کن
     if user_id not in users:
         users[user_id] = {"claimed": False}
         save_users()
 
-    # مدیریت ارجاع (referral)
     if args:
         try:
             referrer_id = int(args[0])
-            # مطمئن شو کسی خودش رو رفر نده و قبلاً ref_by ست نشده
             if referrer_id != user_id and "ref_by" not in users[user_id]:
                 users[user_id]["ref_by"] = referrer_id
                 referrals.setdefault(referrer_id, []).append(user_id)
@@ -171,23 +158,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ----------------------------------------
-# Handle Incoming Wallet Address
+# Handle incoming wallet addresses
 # ----------------------------------------
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     wallet = update.message.text.strip()
 
-    # آیا آدرس ولت صحیح است؟
     if not Web3.is_address(wallet):
         await update.message.reply_text("❌ Invalid wallet address. Please send a valid BSC address.")
         return
 
-    # اگر قبلاً ایردراپ گرفت
     if users.get(user_id, {}).get("claimed"):
         await update.message.reply_text("✅ You have already claimed your airdrop.")
         return
 
-    # چک کن عضو کانال هست یا نه
     if not await is_member(user_id, context.bot):
         await update.message.reply_text(
             "📛 You must join our channel before claiming tokens:\n"
@@ -195,7 +179,6 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ارسال توکن ۵۰۰ برای کاربر
     tx = send_token(wallet, TOKEN_AMOUNT_MAIN)
     if tx:
         users[user_id]["wallet"] = wallet
@@ -207,10 +190,8 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-        # ارسال پاداش معرف (referral bonus) در صورت وجود
         referrer_id = users[user_id].get("ref_by")
         if referrer_id and users.get(referrer_id, {}).get("wallet"):
-            # مطمئن شو این دعوت قبلاً جایزه‌اش پرداخت نشده
             if not users[user_id].get("referral_rewarded"):
                 tx2 = send_token(users[referrer_id]["wallet"], TOKEN_AMOUNT_REFERRAL)
                 if tx2:
@@ -228,10 +209,9 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Failed to send tokens. Please try again later.")
 
 # ----------------------------------------
-# Main: بارگذاری داده‌ها و اجرای ربات
+# Main entry point
 # ----------------------------------------
 def main():
-    # اول داده‌های قبلی رو بارگذاری کن
     load_users()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
