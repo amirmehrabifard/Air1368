@@ -6,11 +6,12 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters
 )
+from telegram.helpers import escape_markdown
 from web3 import Web3
 
 # Configurations
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Set this in env vars
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")  # Set this in env vars
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 AIRDROP_WALLET = "0xd5F168CFa6a68C21d7849171D6Aa5DDc9307E544"
 CONTRACT_ADDRESS = "0xd5baB4C1b92176f9690c0d2771EDbF18b73b8181"
 CHANNEL_USERNAME = "@benjaminfranklintoken"
@@ -20,12 +21,13 @@ TOKEN_AMOUNT_REFERRAL = 100
 
 USERS_FILE = "users.json"
 
-# Logging setup
+# Setup logging
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Web3 setup
+# Setup web3 connection
 w3 = Web3(Web3.HTTPProvider("https://bsc-dataseed.binance.org/"))
+
 ERC20_ABI = [{
     "constant": False,
     "inputs": [
@@ -36,13 +38,12 @@ ERC20_ABI = [{
     "outputs": [{"name": "", "type": "bool"}],
     "type": "function"
 }]
+
 contract = w3.eth.contract(address=Web3.to_checksum_address(CONTRACT_ADDRESS), abi=ERC20_ABI)
 
-# In-memory users/referrals data
 users = {}
 referrals = {}
 
-# Load users data from JSON
 def load_users():
     global users, referrals
     if os.path.exists(USERS_FILE):
@@ -51,37 +52,34 @@ def load_users():
                 data = json.load(f)
                 users = {int(k): v for k, v in data.get("users", {}).items()}
                 referrals = {int(k): v for k, v in data.get("referrals", {}).items()}
-            logger.info(f"Loaded {len(users)} users and {len(referrals)} referrers.")
+                logger.info(f"Loaded {len(users)} users and {len(referrals)} referrals.")
         except Exception as e:
-            logger.error(f"Error loading users.json: {e}")
-            users.clear()
-            referrals.clear()
+            logger.error(f"Failed to load {USERS_FILE}: {e}")
+            users = {}
+            referrals = {}
     else:
-        logger.info("users.json not found, starting fresh.")
+        users = {}
+        referrals = {}
 
-# Save users data to JSON
 def save_users():
     try:
+        data = {
+            "users": {str(k): v for k, v in users.items()},
+            "referrals": {str(k): v for k, v in referrals.items()}
+        }
         with open(USERS_FILE, "w") as f:
-            data_to_save = {
-                "users": {str(k): v for k, v in users.items()},
-                "referrals": {str(k): v for k, v in referrals.items()}
-            }
-            json.dump(data_to_save, f, indent=2)
-        logger.info(f"Saved {len(users)} users and {len(referrals)} referrers.")
+            json.dump(data, f, indent=2)
+        logger.info(f"Saved {len(users)} users and {len(referrals)} referrals.")
     except Exception as e:
-        logger.error(f"Error saving users.json: {e}")
+        logger.error(f"Failed to save {USERS_FILE}: {e}")
 
-# Check if user is member of the channel
 async def is_member(user_id, bot):
     try:
-        member = await bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         return member.status in ["member", "administrator", "creator"]
-    except Exception as e:
-        logger.warning(f"Failed to get chat member info: {e}")
+    except:
         return False
 
-# Send tokens function
 def send_token(to_address, amount):
     try:
         nonce = w3.eth.get_transaction_count(AIRDROP_WALLET)
@@ -96,13 +94,11 @@ def send_token(to_address, amount):
         })
         signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        logger.info(f"Sent {amount} tokens to {to_address}, tx_hash: {tx_hash.hex()}")
         return tx_hash.hex()
     except Exception as e:
-        logger.error(f"Error sending token: {e}")
+        logger.error(f"Token send error: {e}")
         return None
 
-# /start command handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
@@ -111,7 +107,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users[user_id] = {"claimed": False}
         save_users()
 
-    # Handle referral if exists
     if args:
         try:
             referrer_id = int(args[0])
@@ -119,23 +114,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 users[user_id]["ref_by"] = referrer_id
                 referrals.setdefault(referrer_id, []).append(user_id)
                 save_users()
-                logger.info(f"User {user_id} referred by {referrer_id}")
+                logger.info(f"User {user_id} was referred by {referrer_id}")
         except ValueError:
             pass
 
     invite_link = f"https://t.me/{context.bot.username}?start={user_id}"
-
     await update.message.reply_text(
         "👋 Welcome to the BJF Airdrop!\n\n"
-        "✅ Join our official channel:\n"
-        f"👉 https://t.me/benjaminfranklintoken\n\n"
+        "✅ To participate, please join our official channel:\n"
+        "👉 https://t.me/benjaminfranklintoken\n\n"
         "💸 After joining, send your *BSC wallet address* to receive *500 BJF tokens*.\n\n"
-        f"👥 Share your invite link to earn *100 BJF tokens* per referral:\n"
+        f"👥 Share your unique invite link to earn *100 BJF tokens* for each valid referral:\n"
         f"{invite_link}",
         parse_mode="Markdown"
     )
 
-# Wallet address handler
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     wallet = update.message.text.strip()
@@ -145,46 +138,52 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if users.get(user_id, {}).get("claimed"):
-        await update.message.reply_text("✅ You already claimed your airdrop.")
+        await update.message.reply_text("✅ You have already claimed your airdrop.")
         return
 
     if not await is_member(user_id, context.bot):
         await update.message.reply_text(
-            "📛 Please join our channel before claiming tokens:\n"
+            "📛 You must join our channel before claiming tokens:\n"
             "👉 https://t.me/benjaminfranklintoken"
         )
         return
 
-    tx_hash = send_token(wallet, TOKEN_AMOUNT_MAIN)
-    if tx_hash:
+    tx = send_token(wallet, TOKEN_AMOUNT_MAIN)
+    if tx:
         users[user_id]["wallet"] = wallet
         users[user_id]["claimed"] = True
         save_users()
-        await update.message.reply_text(f"🎉 Airdrop sent! TX hash:\n`{tx_hash}`", parse_mode="Markdown")
+
+        await update.message.reply_text(
+            f"🎉 Airdrop sent successfully! Transaction hash:\n`{escape_markdown(tx, version=2)}`",
+            parse_mode="MarkdownV2"
+        )
 
         referrer_id = users[user_id].get("ref_by")
-        if referrer_id and users.get(referrer_id, {}).get("wallet") and not users[user_id].get("referral_rewarded"):
-            tx_ref = send_token(users[referrer_id]["wallet"], TOKEN_AMOUNT_REFERRAL)
-            if tx_ref:
-                users[user_id]["referral_rewarded"] = True
-                save_users()
-                await context.bot.send_message(
-                    chat_id=referrer_id,
-                    text=f"🎁 You got 100 BJF tokens for referring user {user_id}!\nTX: `{tx_ref}`",
-                    parse_mode="Markdown"
-                )
+        if referrer_id and users.get(referrer_id, {}).get("wallet"):
+            if not users[user_id].get("referral_rewarded"):
+                tx2 = send_token(users[referrer_id]["wallet"], TOKEN_AMOUNT_REFERRAL)
+                if tx2:
+                    users[user_id]["referral_rewarded"] = True
+                    save_users()
+                    await context.bot.send_message(
+                        chat_id=referrer_id,
+                        text=(
+                            f"🎁 You received 100 BJF tokens for inviting user {user_id}!\n"
+                            f"TX: `{escape_markdown(tx2, version=2)}`"
+                        ),
+                        parse_mode="MarkdownV2"
+                    )
     else:
-        await update.message.reply_text("⚠️ Failed to send tokens. Try later.")
+        await update.message.reply_text("⚠️ Failed to send tokens. Please try again later.")
 
 def main():
     load_users()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 
-    logger.info("Bot started.")
+    logger.info("Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
