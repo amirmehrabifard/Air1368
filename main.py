@@ -1,107 +1,34 @@
-import json
-import logging
-import os
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from telegram.helpers import escape_markdown
-from web3 import Web3
+import os import json from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes from web3 import Web3 from web3.middleware import geth_poa_middleware
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+BOT_TOKEN = os.getenv("BOT_TOKEN") PRIVATE_KEY = os.getenv("PRIVATE_KEY") TOKEN_CONTRACT_ADDRESS = "0xd5baB4C1b92176f9690c0d2771EDbF18b73b8181" TOKEN_DECIMALS = 18
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+w3 = Web3(Web3.HTTPProvider("https://bsc-dataseed.binance.org/")) w3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-USERS_FILE = "users.json"
-CHAIN_RPC = "https://polygon-rpc.com"  # Polygon mainnet RPC
+SENDER_ADDRESS = Web3.to_checksum_address(w3.eth.account.from_key(PRIVATE_KEY).address)
 
-web3 = Web3(Web3.HTTPProvider(CHAIN_RPC))
-account = web3.eth.account.from_key(PRIVATE_KEY)
+ERC20_ABI = [ { "constant": False, "inputs": [ {"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"} ], "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "type": "function" } ]
 
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        return {}
-    with open(USERS_FILE, "r") as f:
-        return json.load(f)
+if os.path.exists("users.json"): with open("users.json", "r") as f: users = json.load(f) else: users = {}
 
-def save_users(users):
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f)
+def save_users(): with open("users.json", "w") as f: json.dump(users, f)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users = load_users()
-    user_id = str(update.effective_user.id)
-    if user_id not in users:
-        users[user_id] = {"tokens": 500, "invited": 0}
-        save_users(users)
+token_contract = w3.eth.contract(address=Web3.to_checksum_address(TOKEN_CONTRACT_ADDRESS), abi=ERC20_ABI)
 
-    text = (
-        "Welcome! You received 500 tokens as a signup bonus.\n"
-        "Invite your friends to get 100 tokens each.\n"
-        "Use /balance to check your tokens.\n"
-        "Use /withdraw to send tokens."
-    )
-    await update.message.reply_text(text)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): user = update.effective_user user_id = str(user.id)
 
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users = load_users()
-    user_id = str(update.effective_user.id)
-    tokens = users.get(user_id, {}).get("tokens", 0)
-    await update.message.reply_text(f"Your balance: {tokens} tokens.")
+if user_id not in users: users[user_id] = { "balance": 500, "wallet": "", "referrals": [], "invited_by": None } if context.args: ref_id = context.args[0] if ref_id != user_id and ref_id in users and user_id not in users[ref_id]["referrals"]: users[ref_id]["balance"] += 100 users[ref_id]["referrals"].append(user_id) users[user_id]["invited_by"] = ref_id save_users() await update.message.reply_text( "Welcome! You received 500 tokens as a signup bonus.\n" "Invite your friends to get 100 tokens each.\n" "Use /balance to check your tokens.\n" "Use /wallet <address> to register your wallet.\n" "Use /withdraw to send tokens." ) else: await update.message.reply_text("You have already started.") 
 
-async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users = load_users()
-    user_id = str(update.effective_user.id)
-    user_data = users.get(user_id)
-    if not user_data or user_data.get("tokens", 0) < 100:
-        await update.message.reply_text("You need at least 100 tokens to withdraw.")
-        return
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE): user_id = str(update.effective_user.id) bal = users.get(user_id, {}).get("balance", 0) await update.message.reply_text(f"Your balance: {bal} tokens")
 
-    # For simplicity, withdraw fixed 100 tokens
-    try:
-        nonce = web3.eth.get_transaction_count(account.address)
-        tx = {
-            "nonce": nonce,
-            "to": account.address,  # In real use, should be user wallet address
-            "value": web3.to_wei(0, "ether"),
-            "gas": 21000,
-            "gasPrice": web3.eth.gas_price,
-            "data": b"",
-        }
-        signed_tx = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        tx_hash_hex = tx_hash.hex()
+async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE): user_id = str(update.effective_user.id) if not context.args: await update.message.reply_text("Usage: /wallet <your_address>") return address = context.args[0] if not Web3.is_address(address): await update.message.reply_text("Invalid address") return users[user_id]["wallet"] = Web3.to_checksum_address(address) save_users() await update.message.reply_text("Wallet address registered successfully.")
 
-        user_data["tokens"] -= 100
-        save_users(users)
+async def link(update: Update, context: ContextTypes.DEFAULT_TYPE): user_id = str(update.effective_user.id) await update.message.reply_text( f"Your referral link: https://t.me/{context.bot.username}?start={user_id}" )
 
-        safe_tx = escape_markdown(tx_hash_hex, version=2)
-        await update.message.reply_text(
-            f"🎉 Airdrop sent successfully! Transaction hash:\n`{safe_tx}`",
-            parse_mode="MarkdownV2",
-        )
-    except Exception as e:
-        logging.error(f"Withdraw error: {e}")
-        await update.message.reply_text("An error occurred while processing withdrawal.")
+async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE): user_id = str(update.effective_user.id) if user_id not in users: await update.message.reply_text("Please start first with /start") return wallet = users[user_id].get("wallet") balance = users[user_id].get("balance", 0) if not wallet: await update.message.reply_text("You must set your wallet address first using /wallet") return if balance <= 0: await update.message.reply_text("You have no tokens to withdraw.") return
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "/start - Register and get tokens\n"
-        "/balance - Show your token balance\n"
-        "/withdraw - Withdraw tokens\n"
-    )
-    await update.message.reply_text(text)
+amount_wei = int(balance * (10 ** TOKEN_DECIMALS)) nonce = w3.eth.get_transaction_count(SENDER_ADDRESS) try: txn = token_contract.functions.transfer(wallet, amount_wei).build_transaction({ "chainId": 56, "gas": 100000, "gasPrice": w3.to_wei('5', 'gwei'), "nonce": nonce }) signed_txn = w3.eth.account.sign_transaction(txn, private_key=PRIVATE_KEY) tx_hash = w3.eth.send_raw_transaction(signed_txn.rawTransaction) users[user_id]["balance"] = 0 save_users() await update.message.reply_text(f"✅ Withdrawal successful!\nTx: https://bscscan.com/tx/{tx_hash.hex()}") except Exception as e: await update.message.reply_text(f"❌ Error: {str(e)}") 
 
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+def main(): app = ApplicationBuilder().token(BOT_TOKEN).build() app.add_handler(CommandHandler("start", start)) app.add_handler(CommandHandler("balance", balance)) app.add_handler(CommandHandler("wallet", wallet)) app.add_handler(CommandHandler("link", link)) app.add_handler(CommandHandler("withdraw", withdraw)) app.run_polling()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(CommandHandler("withdraw", withdraw))
-    app.add_handler(CommandHandler("help", help_command))
+if name == 'main': main()
 
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
