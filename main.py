@@ -1,25 +1,21 @@
 import os
 import json
-import random
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 
-# Load environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-CHAIN_RPC = "https://bsc-dataseed.binance.org/"  # BNB Smart Chain Mainnet
 
-# Initialize web3
-w3 = Web3(Web3.HTTPProvider(CHAIN_RPC))
+w3 = Web3(Web3.HTTPProvider("https://bsc-dataseed.binance.org/"))
 w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-ACCOUNT = w3.eth.account.from_key(PRIVATE_KEY)
-WALLET_ADDRESS = ACCOUNT.address
 
-# Contract info
+OWNER_ADDRESS = w3.eth.account.privateKeyToAccount(PRIVATE_KEY).address
 CONTRACT_ADDRESS = "0xd5baB4C1b92176f9690c0d2771EDbF18b73b8181"
-CONTRACT_ABI = [
+
+# ABI واقعی که دادی اینجاست 👇
+contract_abi = [
     {"inputs":[],"stateMutability":"nonpayable","type":"constructor"},
     {"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":True,"internalType":"address","name":"spender","type":"address"},{"indexed":False,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Approval","type":"event"},
     {"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"from","type":"address"},{"indexed":True,"internalType":"address","name":"to","type":"address"},{"indexed":False,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Transfer","type":"event"},
@@ -40,119 +36,109 @@ CONTRACT_ABI = [
     {"inputs":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"transferFrom","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}
 ]
 
-contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+contract = w3.eth.contract(address=Web3.to_checksum_address(CONTRACT_ADDRESS), abi=contract_abi)
 
-USERS_FILE = "users.json"
-
-# Load or create users data
-if os.path.exists(USERS_FILE):
-    with open(USERS_FILE, "r") as f:
+if os.path.exists("users.json"):
+    with open("users.json", "r") as f:
         users = json.load(f)
 else:
     users = {}
 
-def save_users():
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f)
-
-def generate_referral_code():
-    return str(random.randint(1000000000, 9999999999))
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    args = context.args
-
     if user_id not in users:
-        referral_code = generate_referral_code()
         users[user_id] = {
+            "invited_by": None,
             "wallet": None,
-            "referral_code": referral_code,
-            "referrer": None,
-            "balance": 0,
-            "referred": []
+            "bonus_received": False
         }
-        # Give signup bonus 500 tokens
-        success = send_tokens(user_id, 500)
-        if not success:
-            await update.message.reply_text("Welcome! You received 500 tokens as a signup bonus, but the transfer failed.")
-        else:
-            users[user_id]["balance"] = 500
-            save_users()
-            await update.message.reply_text(
-                "Welcome! You received 500 tokens as a signup bonus.\n"
-                "Invite your friends to get 100 tokens each.\n"
-                "Use /balance to check your tokens.\n"
-                "Use /withdraw to send tokens."
-            )
-    else:
-        await update.message.reply_text("You are already registered.")
+        if context.args:
+            inviter_id = context.args[0]
+            if inviter_id in users:
+                users[user_id]["invited_by"] = inviter_id
 
-    # If started with referral code
-    if args:
-        ref_code = args[0]
-        # Find referrer by code
-        referrer_id = None
-        for uid, info in users.items():
-            if info.get("referral_code") == ref_code:
-                referrer_id = uid
-                break
+        save_users()
+        await send_tokens(update, 500, "Signup bonus")
 
-        if referrer_id and referrer_id != user_id:
-            # If this user has no referrer yet
-            if users[user_id].get("referrer") is None:
-                users[user_id]["referrer"] = referrer_id
-                users[referrer_id]["balance"] += 100
-                users[referrer_id]["referred"].append(user_id)
-                send_tokens(referrer_id, 100)
-                save_users()
-                await context.bot.send_message(chat_id=referrer_id,
-                                               text=f"You got 100 tokens for referring a new user!")
-    
-    # Send referral link
-    referral_link = f"https://t.me/{context.bot.username}?start={users[user_id]['referral_code']}"
-    await update.message.reply_text(f"Your referral link:\n{referral_link}")
+        inviter = users[user_id]["invited_by"]
+        if inviter:
+            await send_tokens_by_id(inviter, 100, "Referral reward")
 
-async def set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Welcome! You received 500 tokens as a signup bonus.\n"
+        "Invite your friends to get 100 tokens each.\n"
+        "Use /balance to check your tokens.\n"
+        "Use /withdraw to send tokens.\n"
+        f"Your referral link:\nhttps://t.me/Bjfairdrop_bot?start={user_id}"
+    )
+
+def save_users():
+    with open("users.json", "w") as f:
+        json.dump(users, f)
+
+async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id not in users:
-        await update.message.reply_text("Please /start first.")
-        return
-
-    if len(context.args) != 1:
-        await update.message.reply_text("Usage: /wallet YOUR_WALLET_ADDRESS")
-        return
-
-    wallet = context.args[0]
-    if not w3.isAddress(wallet):
-        await update.message.reply_text("Invalid wallet address.")
-        return
-
-    users[user_id]["wallet"] = wallet
-    save_users()
-    await update.message.reply_text(f"Your wallet address has been set to:\n{wallet}")
+    text = update.message.text.strip()
+    if text.startswith("0x") and len(text) == 42:
+        users[user_id]["wallet"] = text
+        save_users()
+        await update.message.reply_text("Wallet address saved.")
+    else:
+        await update.message.reply_text("Please send a valid BNB wallet address (starting with 0x).")
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id not in users:
-        await update.message.reply_text("Please /start first.")
+    wallet = users.get(user_id, {}).get("wallet")
+    if not wallet:
+        await update.message.reply_text("Wallet not set.")
         return
-
-    bal = users[user_id].get("balance", 0)
-    await update.message.reply_text(f"Your token balance is: {bal}")
+    balance = contract.functions.balanceOf(wallet).call()
+    await update.message.reply_text(f"Your token balance: {balance}")
 
 async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id not in users:
-        await update.message.reply_text("Please /start first.")
+    wallet = users.get(user_id, {}).get("wallet")
+    if not wallet:
+        await update.message.reply_text("Wallet not set.")
         return
+    await send_tokens(update, 100, "Withdraw")
 
-    if users[user_id].get("wallet") is None:
-        await update.message.reply_text("Please set your wallet address first with /wallet command.")
+async def send_tokens(update: Update, amount: int, reason: str):
+    user_id = str(update.effective_user.id)
+    to_address = users[user_id].get("wallet")
+    if not to_address:
+        await update.message.reply_text("Please set your wallet address first.")
         return
+    try:
+        nonce = w3.eth.get_transaction_count(OWNER_ADDRESS)
+        tx = contract.functions.transfer(to_address, amount).build_transaction({
+            "chainId": 56,
+            "gas": 200000,
+            "gasPrice": w3.to_wei("5", "gwei"),
+            "nonce": nonce
+        })
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        tx_link = f"https://bscscan.com/tx/{tx_hash.hex()}"
+        await update.message.reply_text(f"{reason} sent successfully!\nTransaction: {tx_link}")
+    except Exception as e:
+        await update.message.reply_text(f"Transaction failed: {e}")
 
-    if users[user_id].get("balance", 0) <= 0:
-        await update.message.reply_text("You have no tokens to withdraw.")
-        return
+async def send_tokens_by_id(user_id, amount: int, reason: str):
+    class DummyMessage:
+        async def reply_text(self, text): pass
 
-    amount = users[user_id]["balance"]
-    users[user_id]["balance"] = 0
+    dummy_update = type('obj', (object,), {
+        'message': DummyMessage(),
+        'effective_user': type('obj', (object,), {'id': int(user_id)})()
+    })()
+
+    await send_tokens(dummy_update, amount, reason)
+
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("withdraw", withdraw))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_wallet))
+    app.run_polling()
