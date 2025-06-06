@@ -1,29 +1,25 @@
 import os
+from telegram.ext import ApplicationBuilder, CommandHandler
 import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# تنظیمات لاگ برای دیدن لاگ‌ها در کنسول
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 
-logger = logging.getLogger(__name__)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-BOT_TOKEN = os.getenv("7279696446:AAEMrXD2-3PwP3eeMph_alwd5UniUKW_NC0")  # مطمئن شو که توکن رو ست کردی
+print("BOT_TOKEN:", BOT_TOKEN)  # For testing if token is read correctly
 
-# هندلر دستور /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_first_name = update.effective_user.first_name
-    await update.message.reply_text(f"Hello, {user_first_name}! Welcome to the bot.")
+async def start(update, context):
+    await update.message.reply_text("Hello! Bot is working.")
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if not BOT_TOKEN:
+        print("Error: BOT_TOKEN is not set!")
+        return
 
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
 
-    logger.info("Bot is running...")
+    print("Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
